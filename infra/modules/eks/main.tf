@@ -129,13 +129,3 @@ resource "aws_security_group" "eks_nodes" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
-
-# Enable EKS Pod Identity Add-on
-resource "aws_eks_addon" "pod_identity" {
-  cluster_name = aws_eks_cluster.this.name
-  addon_name   = "eks-pod-identity-agent"
-  
-  depends_on = [
-    aws_eks_node_group.private_nodes
-  ]
-}
