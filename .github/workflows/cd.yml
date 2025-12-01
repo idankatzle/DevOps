@@ -138,56 +138,56 @@ jobs:
 
 
 
-      # Push image to second AWS account only if CD succeeded
+      # # Push image to second AWS account only if CD succeeded
 
-      - name: Start ECR replicate to second account
-        if: ${{ success() }}
-        run: echo "🚀 Starting image replication to second ECR..."
+      # - name: Start ECR replicate to second account
+      #   if: ${{ success() }}
+      #   run: echo "🚀 Starting image replication to second ECR..."
 
-      # Login to SOURCE ECR (first account)
-      - name: Login to SOURCE ECR
-        if: ${{ success() }}
-        uses: aws-actions/amazon-ecr-login@v2
+      # # Login to SOURCE ECR (first account)
+      # - name: Login to SOURCE ECR
+      #   if: ${{ success() }}
+      #   uses: aws-actions/amazon-ecr-login@v2
 
-      # Pull image from SOURCE ECR
-      - name: Pull image from SOURCE ECR
-        if: ${{ success() }}
-        env:
-          SRC_ECR: ${{ secrets.ECR_NAME }}
-          TAG: latest
-        run: |
-          echo "📥 Pulling image: $SRC_ECR:$TAG"
-          docker pull "$SRC_ECR:$TAG"
+      # # Pull image from SOURCE ECR
+      # - name: Pull image from SOURCE ECR
+      #   if: ${{ success() }}
+      #   env:
+      #     SRC_ECR: ${{ secrets.ECR_NAME }}
+      #     TAG: latest
+      #   run: |
+      #     echo "📥 Pulling image: $SRC_ECR:$TAG"
+      #     docker pull "$SRC_ECR:$TAG"
 
-      # Assume role in SECOND ACCOUNT
-      - name: Configure AWS (SECOND ACCOUNT)
-        if: ${{ success() }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_SECOND_ACCOUNT }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions-repl-second
+      # # Assume role in SECOND ACCOUNT
+      # - name: Configure AWS (SECOND ACCOUNT)
+      #   if: ${{ success() }}
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_SECOND_ACCOUNT }}
+      #     aws-region: ${{ env.AWS_REGION }}
+      #     role-session-name: github-actions-repl-second
 
-      # Login to SECOND ACCOUNT ECR
-      - name: Login to SECOND ACCOUNT ECR
-        if: ${{ success() }}
-        uses: aws-actions/amazon-ecr-login@v2
+      # # Login to SECOND ACCOUNT ECR
+      # - name: Login to SECOND ACCOUNT ECR
+      #   if: ${{ success() }}
+      #   uses: aws-actions/amazon-ecr-login@v2
 
-      # Tag and Push to SECOND ACCOUNT ECR
-      - name: Tag & Push to SECOND ACCOUNT ECR
-        if: ${{ success() }}
-        env:
-          SRC_ECR: ${{ secrets.ECR_NAME }}
-          DST_ECR: ${{ secrets.ECR_NAME_SECOND }}
-          TAG: latest
-        run: |
-          echo "🏷 Tagging: $SRC_ECR:$TAG → $DST_ECR:$TAG"
-          docker tag "$SRC_ECR:$TAG" "$DST_ECR:$TAG"
+      # # Tag and Push to SECOND ACCOUNT ECR
+      # - name: Tag & Push to SECOND ACCOUNT ECR
+      #   if: ${{ success() }}
+      #   env:
+      #     SRC_ECR: ${{ secrets.ECR_NAME }}
+      #     DST_ECR: ${{ secrets.ECR_NAME_SECOND }}
+      #     TAG: latest
+      #   run: |
+      #     echo "🏷 Tagging: $SRC_ECR:$TAG → $DST_ECR:$TAG"
+      #     docker tag "$SRC_ECR:$TAG" "$DST_ECR:$TAG"
 
-          echo "📤 Pushing image to SECOND ACCOUNT:"
-          docker push "$DST_ECR:$TAG"
+      #     echo "📤 Pushing image to SECOND ACCOUNT:"
+      #     docker push "$DST_ECR:$TAG"
 
-          echo "✅ Replication done!"
+      #     echo "✅ Replication done!"
 
 
        # ========== DESTROY ==========
