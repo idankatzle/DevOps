@@ -26,7 +26,7 @@ env:
   VPC_NAME: eksdemo-vpc
   ARGOCD_CLB: eksdemo-argocd-clb
   FLASK_ALB: eksdemo-flask-alb
-  DOMAIN: saharbittman.net
+  DOMAIN: saharbittman.com
 
 jobs:
   deploy:
@@ -170,7 +170,7 @@ jobs:
           
           if [ -z "$HOSTED_ZONE_ID" ]; then
             echo "⚠️ Hosted Zone not found for domain: ${DOMAIN}"
-            exit 0
+            exit 0s
           fi
           
           echo "✅ Found Hosted Zone: $HOSTED_ZONE_ID for domain: ${DOMAIN}"
