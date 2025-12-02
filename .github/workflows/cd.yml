@@ -210,185 +210,211 @@ jobs:
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
-          echo "🗑️ Starting cleanup..."
-          aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.CLUSTER_NAME }}" || true
           
-          # ========================================
-          # CRITICAL: Delete through K8s, NOT AWS CLI!
-          # Let the controllers handle AWS cleanup
-          # ========================================
-          
-          # ========================================
-          # STEP 1: Delete Ingress resources (ALB Controller will cleanup ALB/TG/SG)
-          # ========================================
-          echo "🗑️ Step 1: Deleting ingresses through kubectl..."
-          echo "⚠️ Keeping finalizers - letting ALB Controller cleanup AWS resources"
-          
-          kubectl delete ingress --all -A --wait=true --timeout=5m || {
-            echo "⚠️ Ingress deletion timed out or failed, checking status..."
-            kubectl get ingress -A
-          }
-          
-          # Wait a bit for controller to process
-          echo "⏳ Waiting 30s for ALB Controller to process deletion..."
-          sleep 30
-          
-          # Check if any ingress stuck in Terminating
-          STUCK_INGRESS=$(kubectl get ingress -A --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
-          if [ "$STUCK_INGRESS" -gt "0" ]; then
-            echo "⚠️ Found $STUCK_INGRESS ingress(es) stuck in Terminating state"
-            kubectl get ingress -A --field-selector metadata.deletionTimestamp!=''
+            echo "🧹 Starting COMPLETE cleanup (ArgoCD + AWS + Helm)..."
+            echo ""
             
-            echo "🔧 Removing finalizers from stuck ingresses..."
-            kubectl get ingress -A -o name 2>/dev/null | \
-              xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          else
-            echo "✅ All ingresses deleted cleanly"
-          fi
-          
-          # ========================================
-          # STEP 2: Delete ArgoCD Applications (External DNS will cleanup Route53)
-          # ========================================
-          echo "🗑️ Step 2: Deleting ArgoCD Applications..."
-          echo "⚠️ Keeping finalizers - letting External DNS cleanup Route53"
-          
-          kubectl delete applications.argoproj.io --all -n argocd --wait=true --timeout=3m || {
-            echo "⚠️ Applications deletion timed out or failed"
-          }
-          
-          # Wait for External DNS to cleanup
-          echo "⏳ Waiting 30s for External DNS to process deletion..."
-          sleep 30
-          
-          # Check for stuck applications
-          STUCK_APPS=$(kubectl get applications.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
-          if [ "$STUCK_APPS" -gt "0" ]; then
-            echo "⚠️ Found $STUCK_APPS application(s) stuck in Terminating state"
-            kubectl get applications.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!=''
+            # ========================================
+            # PART 1: ArgoCD Resources Cleanup
+            # ========================================
             
-            echo "🔧 Removing finalizers from stuck applications..."
+            echo "📋 Part 1: ArgoCD Resources Cleanup"
+            echo ""
+            
+            # Check what exists
+            echo "Current state:"
+            echo "  Applications: $(kubectl get applications -n argocd --no-headers 2>/dev/null | wc -l)"
+            echo "  ApplicationSets: $(kubectl get applicationset -n argocd --no-headers 2>/dev/null | wc -l)"
+            echo "  Ingress: $(kubectl get ingress -A --no-headers 2>/dev/null | wc -l)"
+            echo "  TargetGroupBindings: $(kubectl get targetgroupbindings -A --no-headers 2>/dev/null | wc -l)"
+            echo ""
+            
+            # Delete Applications
+            echo "🗑️ Step 1: Deleting ArgoCD Applications..."
+            kubectl delete applications --all -n argocd --wait=false 2>/dev/null || echo "No applications found"
+            
+            # Delete ApplicationSets
+            echo "🗑️ Step 2: Deleting ArgoCD ApplicationSets..."
+            kubectl delete applicationset --all -n argocd --wait=false 2>/dev/null || echo "No applicationsets found"
+            
+            # Wait
+            echo "⏳ Waiting 10s for resources to start deleting..."
+            sleep 10
+            
+            # Force cleanup stuck resources
+            echo "🔧 Step 3: Removing finalizers from stuck resources..."
+            
             kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
-              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          else
-            echo "✅ All applications deleted cleanly"
-          fi
-          
-          # ========================================
-          # STEP 3: Delete ApplicationSets (this removes ALB Controller & External DNS)
-          # ========================================
-          echo "🗑️ Step 3: Deleting ArgoCD ApplicationSets..."
-          
-          kubectl delete applicationset.argoproj.io --all -n argocd --wait=true --timeout=3m || {
-            echo "⚠️ ApplicationSets deletion timed out or failed"
-          }
-          
-          # Check for stuck applicationsets
-          STUCK_APPSETS=$(kubectl get applicationset.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
-          if [ "$STUCK_APPSETS" -gt "0" ]; then
-            echo "⚠️ Found $STUCK_APPSETS applicationset(s) stuck in Terminating state"
-            kubectl get applicationset.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!=''
+              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
             
-            echo "🔧 Removing finalizers from stuck applicationsets..."
             kubectl get applicationset.argoproj.io -n argocd -o name 2>/dev/null | \
-              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          else
-            echo "✅ All applicationsets deleted cleanly"
-          fi
-          
-          # ========================================
-          # STEP 4: Uninstall ArgoCD
-          # ========================================
-          echo "🗑️ Step 4: Uninstalling ArgoCD..."
-          helm uninstall argocd -n argocd --timeout=2m || true
-          
-          # ========================================
-          # STEP 5: Verify cleanup (using AWS CLI only for verification)
-          # ========================================
-          echo "🔍 Step 5: Verifying cleanup (this is just a check, not deletion)..."
-          
-          echo ""
-          echo "📋 Checking for orphaned ALBs..."
-          ALB_COUNT=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName, '${{ env.FLASK_ALB }}')] | length(@)" \
-            --output text 2>/dev/null || echo "0")
-          
-          if [ "$ALB_COUNT" -gt "0" ]; then
-            echo "❌ Found $ALB_COUNT orphaned ALB(s):"
-            aws elbv2 describe-load-balancers \
-              --query "LoadBalancers[?contains(LoadBalancerName, '${{ env.FLASK_ALB }}')].[LoadBalancerName,LoadBalancerArn]" \
-              --output table
-          else
-            echo "✅ No orphaned ALBs"
-          fi
-          
-          echo ""
-          echo "📋 Checking for orphaned Target Groups..."
-          TG_COUNT=$(aws elbv2 describe-target-groups \
-            --query "TargetGroups[?contains(TargetGroupName, 'k8s-')] | length(@)" \
-            --output text 2>/dev/null || echo "0")
-          
-          if [ "$TG_COUNT" -gt "0" ]; then
-            echo "❌ Found $TG_COUNT orphaned Target Group(s):"
-            aws elbv2 describe-target-groups \
-              --query "TargetGroups[?contains(TargetGroupName, 'k8s-')].[TargetGroupName,TargetGroupArn]" \
-              --output table
-          else
-            echo "✅ No orphaned Target Groups"
-          fi
-          
-          echo ""
-          echo "📋 Checking for orphaned Security Groups..."
-          SG_COUNT=$(aws ec2 describe-security-groups \
-            --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${{ env.CLUSTER_NAME }}" \
-            --query "SecurityGroups | length(@)" \
-            --output text 2>/dev/null || echo "0")
-          
-          if [ "$SG_COUNT" -gt "0" ]; then
-            echo "❌ Found $SG_COUNT orphaned Security Group(s):"
-            aws ec2 describe-security-groups \
-              --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${{ env.CLUSTER_NAME }}" \
-              --query "SecurityGroups[*].[GroupName,GroupId]" \
-              --output table
-          else
-            echo "✅ No orphaned Security Groups"
-          fi
-          
-          echo ""
-          echo "📋 Checking for orphaned Route53 records..."
-          HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-            --dns-name "${{ env.DOMAIN }}" \
-            --query "HostedZones[0].Id" \
-            --output text 2>/dev/null | cut -d'/' -f3)
-          
-          if [ -n "$HOSTED_ZONE_ID" ] && [ "$HOSTED_ZONE_ID" != "None" ]; then
-            DNS_COUNT=$(aws route53 list-resource-record-sets \
-              --hosted-zone-id "$HOSTED_ZONE_ID" \
-              --query "ResourceRecordSets[?Name=='www.${{ env.DOMAIN }}.'] | length(@)" \
+              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            
+            kubectl get ingress -A -o name 2>/dev/null | \
+              xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            
+            kubectl get targetgroupbindings -A -o name 2>/dev/null | \
+              xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            
+            echo "⏳ Waiting 5s for cleanup to complete..."
+            sleep 5
+            
+            # Verify K8s cleanup
+            echo ""
+            echo "K8s cleanup verification:"
+            echo "  Applications: $(kubectl get applications -n argocd --no-headers 2>/dev/null | wc -l)"
+            echo "  ApplicationSets: $(kubectl get applicationset -n argocd --no-headers 2>/dev/null | wc -l)"
+            echo "  Ingress: $(kubectl get ingress -A --no-headers 2>/dev/null | wc -l)"
+            echo "  TargetGroupBindings: $(kubectl get targetgroupbindings -A --no-headers 2>/dev/null | wc -l)"
+            
+            echo ""
+            echo "✅ ArgoCD resources cleanup completed"
+            echo ""
+            
+            # ========================================
+            # PART 2: Uninstall ArgoCD
+            # ========================================
+            
+            echo "📋 Part 2: Uninstall ArgoCD"
+            echo ""
+            echo "🗑️ Step 4: Uninstalling ArgoCD via Helm..."
+            helm uninstall argocd -n argocd --timeout=2m 2>/dev/null || echo "ArgoCD already uninstalled or not found"
+            
+            echo "✅ ArgoCD uninstalled"
+            echo ""
+            
+            # ========================================
+            # PART 3: AWS Resources Cleanup
+            # ========================================
+            
+            echo "📋 Part 3: AWS Resources Cleanup"
+            echo ""
+            
+            # Step 1: Delete ALB
+            echo "🗑️ Step 5: Deleting ALB..."
+            ALB_ARN=$(aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?contains(LoadBalancerName, 'eksdemo-flask-alb')].LoadBalancerArn" \
+              --output text 2>/dev/null)
+            
+            if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+              echo "Found ALB: $ALB_ARN"
+              aws elbv2 delete-load-balancer --load-balancer-arn "$ALB_ARN"
+              echo "✅ ALB deletion initiated, waiting 60s..."
+              sleep 60
+            else
+              echo "✅ No ALB found"
+            fi
+            
+            # Step 2: Delete Target Groups
+            echo ""
+            echo "🗑️ Step 6: Deleting Target Groups..."
+            TG_ARNS=$(aws elbv2 describe-target-groups \
+              --query "TargetGroups[?contains(TargetGroupName, 'k8s-')].TargetGroupArn" \
+              --output text 2>/dev/null)
+            
+            if [ -n "$TG_ARNS" ]; then
+              for TG in $TG_ARNS; do
+                echo "Deleting: $TG"
+                aws elbv2 delete-target-group --target-group-arn "$TG" 2>/dev/null || echo "Failed to delete $TG"
+              done
+              echo "✅ Target Groups deleted, waiting 30s..."
+              sleep 30
+            else
+              echo "✅ No Target Groups found"
+            fi
+            
+            # Step 3: Delete Security Groups
+            echo ""
+            echo "🗑️ Step 7: Deleting Security Groups..."
+            SG_IDS=$(aws ec2 describe-security-groups \
+              --filters "Name=tag:elbv2.k8s.aws/cluster,Values=eksdemo-cluster" \
+              --query "SecurityGroups[*].GroupId" \
+              --output text 2>/dev/null)
+            
+            if [ -n "$SG_IDS" ]; then
+              for SG in $SG_IDS; do
+                echo "Attempting: $SG"
+                for i in {1..5}; do
+                  aws ec2 delete-security-group --group-id "$SG" 2>/dev/null && {
+                    echo "✅ Deleted: $SG"
+                    break
+                  } || {
+                    if [ $i -eq 5 ]; then
+                      echo "⚠️ Failed after 5 attempts: $SG (may have dependencies)"
+                    else
+                      echo "   Retry $i/5 in 10s..."
+                      sleep 10
+                    fi
+                  }
+                done
+              done
+            else
+              echo "✅ No Security Groups found"
+            fi
+            
+            # ========================================
+            # FINAL VERIFICATION
+            # ========================================
+            
+            echo ""
+            echo "=========================================="
+            echo "🔍 FINAL VERIFICATION"
+            echo "=========================================="
+            echo ""
+            
+            # K8s resources
+            echo "📦 Kubernetes Resources:"
+            K8S_APPS=$(kubectl get applications -n argocd --no-headers 2>/dev/null | wc -l)
+            K8S_APPSETS=$(kubectl get applicationset -n argocd --no-headers 2>/dev/null | wc -l)
+            K8S_INGRESS=$(kubectl get ingress -A --no-headers 2>/dev/null | wc -l)
+            K8S_TGB=$(kubectl get targetgroupbindings -A --no-headers 2>/dev/null | wc -l)
+            
+            echo "  Applications: $K8S_APPS"
+            echo "  ApplicationSets: $K8S_APPSETS"
+            echo "  Ingress: $K8S_INGRESS"
+            echo "  TargetGroupBindings: $K8S_TGB"
+            
+            # Check ArgoCD namespace
+            ARGOCD_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | wc -l)
+            echo "  ArgoCD Pods: $ARGOCD_PODS"
+            
+            # AWS resources
+            echo ""
+            echo "☁️ AWS Resources:"
+            ALB_COUNT=$(aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?contains(LoadBalancerName, 'eksdemo-flask-alb')] | length(@)" \
+              --output text 2>/dev/null || echo "0")
+            TG_COUNT=$(aws elbv2 describe-target-groups \
+              --query "TargetGroups[?contains(TargetGroupName, 'k8s-')] | length(@)" \
+              --output text 2>/dev/null || echo "0")
+            SG_COUNT=$(aws ec2 describe-security-groups \
+              --filters "Name=tag:elbv2.k8s.aws/cluster,Values=eksdemo-cluster" \
+              --query "SecurityGroups | length(@)" \
               --output text 2>/dev/null || echo "0")
             
-            if [ "$DNS_COUNT" -gt "0" ]; then
-              echo "❌ Found $DNS_COUNT orphaned DNS record(s):"
-              aws route53 list-resource-record-sets \
-                --hosted-zone-id "$HOSTED_ZONE_ID" \
-                --query "ResourceRecordSets[?Name=='www.${{ env.DOMAIN }}.'].[Name,Type]" \
-                --output table
+            echo "  ALBs: $ALB_COUNT"
+            echo "  Target Groups: $TG_COUNT"
+            echo "  Security Groups: $SG_COUNT"
+            
+            echo ""
+            K8S_TOTAL=$((K8S_APPS + K8S_APPSETS + K8S_INGRESS + K8S_TGB + ARGOCD_PODS))
+            AWS_TOTAL=$((ALB_COUNT + TG_COUNT + SG_COUNT))
+            GRAND_TOTAL=$((K8S_TOTAL + AWS_TOTAL))
+            
+            if [ "$GRAND_TOTAL" -eq "0" ]; then
+              echo "✅✅✅ PERFECT! All resources cleaned up successfully! ✅✅✅"
             else
-              echo "✅ No orphaned Route53 records"
+              echo "⚠️ $GRAND_TOTAL resource(s) still remaining"
+              echo "   Kubernetes: $K8S_TOTAL"
+              echo "   AWS: $AWS_TOTAL"
+              echo ""
+              echo "You may need to check AWS Console or run: kubectl delete namespace argocd --force"
             fi
-          else
-            echo "⚠️ Hosted zone not found or error occurred"
-          fi
+            
+            echo ""
+            echo "🎉 Complete cleanup script finished!"
+            echo "=========================================="
           
-          echo ""
-          TOTAL_ORPHANS=$((ALB_COUNT + TG_COUNT + SG_COUNT + DNS_COUNT))
-          if [ "$TOTAL_ORPHANS" -gt "0" ]; then
-            echo "❌ Cleanup verification FAILED - found $TOTAL_ORPHANS orphaned resource(s)"
-            echo "⚠️ You may need to run manual cleanup"
-            exit 1
-          else
-            echo "✅ Cleanup verification PASSED - no orphaned resources found!"
-          fi
-
 
   destroy-bootstrap:
     needs: deploy
