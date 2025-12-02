@@ -51,6 +51,22 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions
 
+      # ========================================
+      # 🔍 Trivy Security Scan - ArgoCD Manifests Only
+      # ========================================
+      
+      - name: 🔍 Trivy - Scan ArgoCD Kubernetes Manifests
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: 'ArgoCD/'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          trivyignores: '.trivyignore'
+
       # Update kubeconfig
       - name: Update kubeconfig for EKS
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
@@ -112,7 +128,6 @@ jobs:
           envsubst < ArgoCD/externalCharts/alb_dns.yaml | kubectl apply -f -
           envsubst < ArgoCD/externalCharts/secrets.yaml | kubectl apply -f -
           envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
-          envsubst < ArgoCD/myChart/helm_chart/templates/serviceaccount.yaml
           sleep 10
           kubectl get applications -n argocd
 
