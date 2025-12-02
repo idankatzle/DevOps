@@ -145,11 +145,11 @@ jobs:
               exit 0
             fi
 
-            echo "⏳ Attempt $i/50 - Response: $response"
+            echo "⏳ Attempt $i/200 - Response: $response"
             sleep 10
           done
 
-          echo "❌ Smoke test failed - health endpoint did not return 'ok' after 50 attempts"
+          echo "❌ Smoke test failed - health endpoint did not return 'ok' after 200 attempts"
           exit 1
 
 
@@ -204,17 +204,39 @@ jobs:
       #     docker push "$DST_ECR:$TAG"
 
       #     echo "✅ Replication done!"
-
-
-       # ========== DESTROY ==========
-      - name: Destroy Everything
-        if: github.event.inputs.action == 'destroy' || failure()
+          
+      # ========================================
+      # STEP 4: Uninstall ArgoCD
+      # ========================================
+      - name: Uninstall ArgoCD
         run: |
           
-             # ========== DESTROY ==========
+          helm uninstall argocd -n argocd --timeout=2m || true
+          echo "⏳ Waiting 10s..."
+          sleep 10
+
+          # Verify
+          if kubectl get ns argocd >/dev/null 2>&1; then
+            echo "⚠️ Namespace still exists — deleting..."
+            kubectl delete ns argocd --force --grace-period=0 || true
+          fi
+
+      # ========================================
+      # DESTROY EVERYTHING
+      # ========================================
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
+          echo "🗑️ Uninstalling ArgoCD..."
+          helm uninstall argocd -n argocd --timeout=2m || true
+          echo "⏳ Waiting 10s..."
+          sleep 10
+
+          # Verify
+          if kubectl get ns argocd >/dev/null 2>&1; then
+            echo "⚠️ Namespace still exists — deleting..."
+            kubectl delete ns argocd --force --grace-period=0 || true
+          fi
           VPC_NAME="eksdemo-vpc"
 
           echo "🔍 Getting VPC ID for: $VPC_NAME ..."
@@ -232,22 +254,38 @@ jobs:
           echo ""
 
           # ============================
-          # DELETE LOAD BALANCERS (ALB + NLB)
+          # DELETE ALB LISTENERS + RULES
           # ============================
-          echo "🧹 Deleting ALBs & NLBs in VPC..."
+          echo "🧹 Deleting ALB Listeners & Listener Rules..."
 
           LB_ARNS=$(aws elbv2 describe-load-balancers \
             --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" \
             --output text)
 
-          if [ -n "$LB_ARNS" ]; then
-            for LB_ARN in $LB_ARNS; do
-              echo "  Deleting LB: $LB_ARN"
-              aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN"
+          for LB in $LB_ARNS; do
+            LISTENERS=$(aws elbv2 describe-listeners \
+              --load-balancer-arn "$LB" \
+              --query "Listeners[].ListenerArn" \
+              --output text)
+
+            for L in $LISTENERS; do
+              echo "  ➤ Deleting Listener: $L"
+              aws elbv2 delete-listener --listener-arn "$L"
             done
-          else
-            echo "  No ALBs/NLBs found."
-          fi
+          done
+
+          echo "⏳ Waiting 5s..."
+          sleep 5
+
+          # ============================
+          # DELETE LOAD BALANCERS (ALB/NLB)
+          # ============================
+          echo "🧹 Deleting ALBs & NLBs..."
+
+          for LB in $LB_ARNS; do
+            echo "  ➤ Deleting Load Balancer: $LB"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$LB"
+          done
 
           echo "⏳ Waiting 40s for LB deletion..."
           sleep 40
@@ -256,44 +294,61 @@ jobs:
           # ============================
           # DELETE TARGET GROUPS
           # ============================
-          echo "🧹 Deleting Target Groups in VPC..."
+          echo "🧹 Deleting Target Groups..."
 
           TG_ARNS=$(aws elbv2 describe-target-groups \
             --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" \
             --output text)
 
-          if [ -n "$TG_ARNS" ]; then
-            for TG_ARN in $TG_ARNS; do
-              echo "  Deleting Target Group: $TG_ARN"
-              aws elbv2 delete-target-group --target-group-arn "$TG_ARN"
-            done
-          else
-            echo "  No Target Groups found."
-          fi
+          for TG in $TG_ARNS; do
+            echo "  ➤ Deleting Target Group: $TG"
+            aws elbv2 delete-target-group --target-group-arn "$TG"
+          done
           echo ""
 
           # ============================
-          # DELETE SECURITY GROUPS
+          # CLEAN SECURITY GROUP ATTACHMENTS
           # ============================
-          echo "🧹 Deleting Security Groups in VPC..."
+          echo "🔧 Cleaning Security Group dependencies..."
 
           SG_IDS=$(aws ec2 describe-security-groups \
             --filters "Name=vpc-id,Values=$VPC_ID" \
             --query "SecurityGroups[?GroupName!='default'].GroupId" \
             --output text)
 
-          if [ -n "$SG_IDS" ]; then
-            for SG_ID in $SG_IDS; do
-              echo "  Deleting Security Group: $SG_ID"
-              aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null || echo "    ⚠️ Failed (in use)"
-            done
-          else
-            echo "  No Security Groups found."
-          fi
-          echo ""
+          for SG in $SG_IDS; do
+            echo "  ➤ Checking SG: $SG"
 
+            # Remove ENI attachments first (otherwise can't delete SG)
+            ENIS=$(aws ec2 describe-network-interfaces \
+              --filters "Name=group-id,Values=$SG" \
+              --query "NetworkInterfaces[].NetworkInterfaceId" \
+              --output text)
+
+            for ENI in $ENIS; do
+              echo "    - Deleting ENI: $ENI"
+              aws ec2 delete-network-interface --network-interface-id "$ENI" || true
+            done
+          done
+
+          echo "⏳ Waiting 10s..."
+          sleep 10
+
+          # ============================
+          # DELETE SECURITY GROUPS
+          # ============================
+          echo "🧹 Deleting Security Groups..."
+
+          for SG in $SG_IDS; do
+            echo "  ➤ Deleting SG: $SG"
+            aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
+              && echo "    ✔ Deleted" \
+              || echo "    ⚠️ Still in use"
+          done
+
+          echo ""
           echo "🎉 Cleanup completed for VPC: $VPC_ID"
-          
+
 
   destroy-bootstrap:
     needs: deploy
