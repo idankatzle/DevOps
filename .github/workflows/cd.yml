@@ -29,16 +29,12 @@ env:
   DOMAIN: saharbittman.com
 
 jobs:
-  # Job 1: Deploy/Apply
   deploy:
     runs-on: ubuntu-latest
     if: >
-      ${{
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply') ||
-        (
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.conclusion == 'success'
-        )
+      ${{ 
+        github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' ||
+        github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' 
       }}
     steps:
       - name: Checkout
@@ -63,8 +59,7 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Update kubeconfig for EKS
-        run: |
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+        run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
       - name: Configure aws-auth
         run: |
@@ -102,7 +97,7 @@ jobs:
           ARGOCD_ADMIN_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode)
           echo "🔑 ArgoCD initial admin password: $ARGOCD_ADMIN_PASSWORD"
 
-      - name: Get VPC and Deploy Apps
+      - name: Deploy Apps
         run: |
           export VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
@@ -118,33 +113,22 @@ jobs:
       - name: Smoke Test
         run: |
           URL="https://www.saharbittman.com/health"
-
           for i in {1..200}; do
             response=$(curl -k -s "$URL" || true)
-
             if [ "${response,,}" = "ok" ]; then
               echo "✅ Health check passed! Response: $response"
               exit 0
             fi
-
             echo "⏳ Attempt $i/200 - Response: $response"
             sleep 10
           done
-
-          echo "❌ Smoke test failed - health endpoint did not return 'ok' after 200 attempts"
+          echo "❌ Smoke test failed"
           exit 1
 
-  # Job 2: Destroy (Manual OR on Deploy Failure)
   destroy:
     runs-on: ubuntu-latest
     if: >
-      ${{
-        always() &&
-        (
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy') ||
-          needs.deploy.result == 'failure'
-        )
-      }}
+      ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -157,260 +141,17 @@ jobs:
           role-session-name: github-actions
 
       - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+        run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
       - name: Destroy Everything
         run: |
-          echo "🗑️ Deleting ArgoCD ApplicationSets..."
-          kubectl delete applicationsets --all -n argocd --timeout=5m || true
-          
-          echo "⏳ Waiting 10s..."
-          sleep 10
-          
-          echo "🗑️ Deleting ArgoCD Applications..."
-          kubectl delete applications --all -n argocd --timeout=5m || true
-          
-          echo "⏳ Waiting 30s for applications cleanup..."
-          sleep 30
-          
-          echo "🗑️ Uninstalling ArgoCD via Helm..."
-          helm uninstall argocd -n argocd --wait --timeout=10m || true
-          
-          echo "⏳ Waiting 60s for LoadBalancer deletion..."
-          sleep 60
-          
-          echo "🔍 Verifying ArgoCD CLB deletion..."
-          
-          CLB_ARN=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?LoadBalancerName=='${{ env.ARGOCD_CLB }}'].LoadBalancerArn" \
-            --output text)
+          # כאן ניתן להשאיר את כל סקריפט ה-destroy שהכנת
+          bash ArgoCD/scripts/destroy.sh
 
-          if [ -z "$CLB_ARN" ] || [ "$CLB_ARN" = "None" ]; then
-            echo "✅ ArgoCD CLB successfully deleted"
-          else
-            echo "⚠️ Found orphaned CLB: $CLB_ARN - cleaning up..."
-            
-            LISTENERS=$(aws elbv2 describe-listeners \
-              --load-balancer-arn "$CLB_ARN" \
-              --query "Listeners[].ListenerArn" \
-              --output text)
-
-            for L in $LISTENERS; do
-              echo "  ➤ Deleting Listener: $L"
-              aws elbv2 delete-listener --listener-arn "$L" || true
-            done
-
-            sleep 5
-            echo "  ➤ Deleting orphaned CLB..."
-            aws elbv2 delete-load-balancer --load-balancer-arn "$CLB_ARN" || true
-            sleep 40
-          fi
-
-          echo "🔍 Checking for orphaned ArgoCD Target Groups..."
-          
-          TG_ARNS=$(aws elbv2 describe-target-groups \
-            --query "TargetGroups[?contains(TargetGroupName, 'argocd')].TargetGroupArn" \
-            --output text)
-
-          if [ -z "$TG_ARNS" ]; then
-            echo "✅ No orphaned Target Groups found"
-          else
-            echo "⚠️ Cleaning orphaned Target Groups..."
-            for TG in $TG_ARNS; do
-              echo "  ➤ Deleting Target Group: $TG"
-              aws elbv2 delete-target-group --target-group-arn "$TG" || true
-            done
-          fi
-
-          echo "🎉 ArgoCD cleanup completed!"
-          
-          echo "🗑️ Deleting argocd namespace..."
-          kubectl delete namespace argocd --timeout=5m || true
-          
-          echo "⏳ Waiting 20s..."
-          sleep 20
-
-          echo "🔍 Getting VPC ID for: ${{ env.VPC_NAME }} ..."
-          VPC_ID=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
-            --query "Vpcs[0].VpcId" \
-            --output text)
-
-          if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
-            echo "⚠️ VPC not found - skipping VPC cleanup"
-          else
-            echo "✅ VPC found: $VPC_ID"
-
-            echo "🧹 Deleting ALB Listeners..."
-            LB_ARNS=$(aws elbv2 describe-load-balancers \
-              --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" \
-              --output text)
-
-            for LB in $LB_ARNS; do
-              LISTENERS=$(aws elbv2 describe-listeners \
-                --load-balancer-arn "$LB" \
-                --query "Listeners[].ListenerArn" \
-                --output text)
-
-              for L in $LISTENERS; do
-                echo "  ➤ Deleting Listener: $L"
-                aws elbv2 delete-listener --listener-arn "$L" || true
-              done
-            done
-
-            sleep 5
-
-            echo "🧹 Deleting ALBs..."
-            for LB in $LB_ARNS; do
-              echo "  ➤ Deleting Load Balancer: $LB"
-              aws elbv2 delete-load-balancer --load-balancer-arn "$LB" || true
-            done
-
-            echo "⏳ Waiting 90s for ALB deletion..."
-            sleep 90
-
-            echo "🧹 Deleting Target Groups..."
-            TG_ARNS=$(aws elbv2 describe-target-groups \
-              --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" \
-              --output text)
-
-            for TG in $TG_ARNS; do
-              echo "  ➤ Deleting Target Group: $TG"
-              aws elbv2 delete-target-group --target-group-arn "$TG" || true
-            done
-
-            echo "⏳ Waiting 30s..."
-            sleep 30
-
-            echo "🔧 Cleaning ENIs..."
-            SG_IDS=$(aws ec2 describe-security-groups \
-              --filters "Name=vpc-id,Values=$VPC_ID" \
-              --query "SecurityGroups[?GroupName!='default'].GroupId" \
-              --output text)
-
-            for SG in $SG_IDS; do
-              echo "  ➤ Checking SG: $SG"
-              
-              ENIS=$(aws ec2 describe-network-interfaces \
-                --filters "Name=group-id,Values=$SG" \
-                --query "NetworkInterfaces[].NetworkInterfaceId" \
-                --output text)
-
-              for ENI in $ENIS; do
-                echo "    - Deleting ENI: $ENI"
-                aws ec2 delete-network-interface --network-interface-id "$ENI" || true
-              done
-            done
-
-            echo "⏳ Waiting 30s for ENI cleanup..."
-            sleep 30
-
-            echo "🧹 Removing Security Group cross-references..."
-            for SG in $SG_IDS; do
-              echo "  ➤ Processing SG: $SG"
-              
-              for OTHER_SG in $SG_IDS; do
-                if [ "$SG" != "$OTHER_SG" ]; then
-                  echo "    - Removing references from $OTHER_SG to $SG"
-                  
-                  aws ec2 revoke-security-group-ingress \
-                    --group-id "$OTHER_SG" \
-                    --source-group "$SG" 2>/dev/null || true
-                  
-                  aws ec2 revoke-security-group-egress \
-                    --group-id "$OTHER_SG" \
-                    --source-group "$SG" 2>/dev/null || true
-                fi
-              done
-            done
-
-            echo "⏳ Waiting 20s..."
-            sleep 20
-
-            echo "🧹 Deleting Security Groups (1st attempt)..."
-            for SG in $SG_IDS; do
-              SG_NAME=$(aws ec2 describe-security-groups \
-                --group-ids "$SG" \
-                --query "SecurityGroups[0].GroupName" \
-                --output text 2>/dev/null || echo "")
-              
-              echo "  ➤ Revoking all rules for SG: $SG ($SG_NAME)"
-              
-              INGRESS=$(aws ec2 describe-security-groups \
-                --group-ids "$SG" \
-                --query 'SecurityGroups[0].IpPermissions' \
-                --output json 2>/dev/null || echo "[]")
-              
-              if [ "$INGRESS" != "[]" ] && [ "$INGRESS" != "null" ]; then
-                aws ec2 revoke-security-group-ingress \
-                  --group-id "$SG" \
-                  --ip-permissions "$INGRESS" 2>/dev/null || true
-              fi
-              
-              EGRESS=$(aws ec2 describe-security-groups \
-                --group-ids "$SG" \
-                --query 'SecurityGroups[0].IpPermissionsEgress' \
-                --output json 2>/dev/null || echo "[]")
-              
-              if [ "$EGRESS" != "[]" ] && [ "$EGRESS" != "null" ]; then
-                aws ec2 revoke-security-group-egress \
-                  --group-id "$SG" \
-                  --ip-permissions "$EGRESS" 2>/dev/null || true
-              fi
-              
-              sleep 2
-              
-              echo "  ➤ Deleting SG: $SG"
-              aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
-                && echo "    ✔ Deleted" \
-                || echo "    ⚠️ Still in use, will retry..."
-            done
-
-            echo "⏳ Waiting 40s before retry..."
-            sleep 40
-
-            echo "🧹 Deleting Security Groups (2nd attempt)..."
-            for SG in $SG_IDS; do
-              SG_EXISTS=$(aws ec2 describe-security-groups \
-                --group-ids "$SG" \
-                --query "SecurityGroups[0].GroupId" \
-                --output text 2>/dev/null || echo "")
-              
-              if [ -n "$SG_EXISTS" ] && [ "$SG_EXISTS" != "None" ]; then
-                echo "  ➤ Retry deleting SG: $SG"
-                aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
-                  && echo "    ✔ Deleted" \
-                  || echo "    ⚠️ Failed - will try once more"
-              fi
-            done
-
-            echo "⏳ Waiting 30s..."
-            sleep 30
-
-            echo "🧹 Final Security Groups cleanup (3rd attempt)..."
-            for SG in $SG_IDS; do
-              SG_EXISTS=$(aws ec2 describe-security-groups \
-                --group-ids "$SG" \
-                --query "SecurityGroups[0].GroupId" \
-                --output text 2>/dev/null || echo "")
-              
-              if [ -n "$SG_EXISTS" ] && [ "$SG_EXISTS" != "None" ]; then
-                echo "  ➤ Final attempt for SG: $SG"
-                aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
-                  && echo "    ✔ Deleted" \
-                  || echo "    ❌ Could not delete - may be managed by AWS LB Controller"
-              fi
-            done
-          fi
-
-          echo "🎉 Full cleanup completed!"
-
-  # Job 3: Destroy Bootstrap (Only on Manual Destroy)
   destroy-bootstrap:
     needs: [destroy]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
