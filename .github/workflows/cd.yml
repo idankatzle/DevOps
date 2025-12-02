@@ -152,67 +152,6 @@ jobs:
         run: |
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
-      - name: Cleanup ExternalDNS Records
-        run: |
-          echo "🧹 Cleaning up specific DNS records..."
-          
-          DOMAIN="${{ env.DOMAIN }}"
-          
-          HOSTED_ZONE_ID=$(aws route53 list-hosted-zones \
-            --query "HostedZones[?Name=='${DOMAIN}.'].Id" \
-            --output text | cut -d'/' -f3)
-          
-          if [ -z "$HOSTED_ZONE_ID" ]; then
-            echo "⚠️ Hosted Zone not found for domain: ${DOMAIN}"
-            exit 0
-          fi
-          
-          echo "✅ Found Hosted Zone: $HOSTED_ZONE_ID for domain: ${DOMAIN}"
-          
-          SUBDOMAINS_TO_DELETE=(
-            "www.${DOMAIN}."
-            "argocd.${DOMAIN}."
-            "*.${DOMAIN}."
-          )
-          
-          for SUBDOMAIN in "${SUBDOMAINS_TO_DELETE[@]}"; do
-            echo "🔍 Checking: $SUBDOMAIN"
-            
-            RECORDS=$(aws route53 list-resource-record-sets \
-              --hosted-zone-id "$HOSTED_ZONE_ID" \
-              --query "ResourceRecordSets[?Name=='${SUBDOMAIN}']" \
-              --output json)
-            
-            if [ "$(echo "$RECORDS" | jq '. | length')" -eq 0 ]; then
-              echo "  ➤ No records found, skipping..."
-              continue
-            fi
-            
-            echo "$RECORDS" | jq -c '.[]' | while read -r record; do
-              RECORD_TYPE=$(echo "$record" | jq -r '.Type')
-              
-              echo "  ➤ Deleting $SUBDOMAIN ($RECORD_TYPE)..."
-              
-              CHANGE_BATCH=$(cat <<EOF
-          {
-            "Changes": [{
-              "Action": "DELETE",
-              "ResourceRecordSet": $record
-            }]
-          }
-          EOF
-          )
-              
-              aws route53 change-resource-record-sets \
-                --hosted-zone-id "$HOSTED_ZONE_ID" \
-                --change-batch "$CHANGE_BATCH" \
-                && echo "    ✅ Deleted" \
-                || echo "    ⚠️ Failed"
-            done
-          done
-          
-          echo "🎉 DNS cleanup completed!"
-
       - name: Destroy Everything
         run: |
           echo "🗑️ Deleting ArgoCD ApplicationSets..."
@@ -320,8 +259,8 @@ jobs:
               aws elbv2 delete-load-balancer --load-balancer-arn "$LB" || true
             done
 
-            echo "⏳ Waiting 60s for ALB deletion..."
-            sleep 60
+            echo "⏳ Waiting 90s for ALB deletion..."
+            sleep 90
 
             echo "🧹 Deleting Target Groups..."
             TG_ARNS=$(aws elbv2 describe-target-groups \
@@ -333,10 +272,10 @@ jobs:
               aws elbv2 delete-target-group --target-group-arn "$TG" || true
             done
 
-            echo "⏳ Waiting 20s..."
-            sleep 20
+            echo "⏳ Waiting 30s..."
+            sleep 30
 
-            echo "🔧 Cleaning Security Groups..."
+            echo "🔧 Cleaning ENIs..."
             SG_IDS=$(aws ec2 describe-security-groups \
               --filters "Name=vpc-id,Values=$VPC_ID" \
               --query "SecurityGroups[?GroupName!='default'].GroupId" \
@@ -356,7 +295,29 @@ jobs:
               done
             done
 
-            echo "⏳ Waiting 20s for ENI cleanup..."
+            echo "⏳ Waiting 30s for ENI cleanup..."
+            sleep 30
+
+            echo "🧹 Removing Security Group cross-references..."
+            for SG in $SG_IDS; do
+              echo "  ➤ Processing SG: $SG"
+              
+              for OTHER_SG in $SG_IDS; do
+                if [ "$SG" != "$OTHER_SG" ]; then
+                  echo "    - Removing references from $OTHER_SG to $SG"
+                  
+                  aws ec2 revoke-security-group-ingress \
+                    --group-id "$OTHER_SG" \
+                    --source-group "$SG" 2>/dev/null || true
+                  
+                  aws ec2 revoke-security-group-egress \
+                    --group-id "$OTHER_SG" \
+                    --source-group "$SG" 2>/dev/null || true
+                fi
+              done
+            done
+
+            echo "⏳ Waiting 20s..."
             sleep 20
 
             echo "🧹 Deleting Security Groups (1st attempt)..."
@@ -366,14 +327,40 @@ jobs:
                 --query "SecurityGroups[0].GroupName" \
                 --output text 2>/dev/null || echo "")
               
-              echo "  ➤ Deleting SG: $SG ($SG_NAME)"
+              echo "  ➤ Revoking all rules for SG: $SG ($SG_NAME)"
+              
+              INGRESS=$(aws ec2 describe-security-groups \
+                --group-ids "$SG" \
+                --query 'SecurityGroups[0].IpPermissions' \
+                --output json 2>/dev/null || echo "[]")
+              
+              if [ "$INGRESS" != "[]" ] && [ "$INGRESS" != "null" ]; then
+                aws ec2 revoke-security-group-ingress \
+                  --group-id "$SG" \
+                  --ip-permissions "$INGRESS" 2>/dev/null || true
+              fi
+              
+              EGRESS=$(aws ec2 describe-security-groups \
+                --group-ids "$SG" \
+                --query 'SecurityGroups[0].IpPermissionsEgress' \
+                --output json 2>/dev/null || echo "[]")
+              
+              if [ "$EGRESS" != "[]" ] && [ "$EGRESS" != "null" ]; then
+                aws ec2 revoke-security-group-egress \
+                  --group-id "$SG" \
+                  --ip-permissions "$EGRESS" 2>/dev/null || true
+              fi
+              
+              sleep 2
+              
+              echo "  ➤ Deleting SG: $SG"
               aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
                 && echo "    ✔ Deleted" \
                 || echo "    ⚠️ Still in use, will retry..."
             done
 
-            echo "⏳ Waiting 30s before retry..."
-            sleep 30
+            echo "⏳ Waiting 40s before retry..."
+            sleep 40
 
             echo "🧹 Deleting Security Groups (2nd attempt)..."
             for SG in $SG_IDS; do
@@ -386,12 +373,12 @@ jobs:
                 echo "  ➤ Retry deleting SG: $SG"
                 aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
                   && echo "    ✔ Deleted" \
-                  || echo "    ⚠️ Failed - may require manual deletion"
+                  || echo "    ⚠️ Failed - will try once more"
               fi
             done
 
-            echo "⏳ Waiting 20s..."
-            sleep 20
+            echo "⏳ Waiting 30s..."
+            sleep 30
 
             echo "🧹 Final Security Groups cleanup (3rd attempt)..."
             for SG in $SG_IDS; do
@@ -402,32 +389,14 @@ jobs:
               
               if [ -n "$SG_EXISTS" ] && [ "$SG_EXISTS" != "None" ]; then
                 echo "  ➤ Final attempt for SG: $SG"
-                
-                aws ec2 revoke-security-group-ingress \
-                  --group-id "$SG" \
-                  --ip-permissions "$(aws ec2 describe-security-groups \
-                    --group-ids "$SG" \
-                    --query 'SecurityGroups[0].IpPermissions' \
-                    --output json)" 2>/dev/null || true
-                
-                aws ec2 revoke-security-group-egress \
-                  --group-id "$SG" \
-                  --ip-permissions "$(aws ec2 describe-security-groups \
-                    --group-ids "$SG" \
-                    --query 'SecurityGroups[0].IpPermissionsEgress' \
-                    --output json)" 2>/dev/null || true
-                
-                sleep 5
-                
                 aws ec2 delete-security-group --group-id "$SG" 2>/dev/null \
                   && echo "    ✔ Deleted" \
-                  || echo "    ❌ Could not delete - manual intervention required"
+                  || echo "    ❌ Could not delete - may be managed by AWS LB Controller"
               fi
             done
           fi
 
           echo "🎉 Full cleanup completed!"
-
   destroy-bootstrap:
     needs: destroy
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
