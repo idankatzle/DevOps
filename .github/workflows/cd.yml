@@ -136,7 +136,6 @@ jobs:
 
   # Job 2: Destroy (Manual OR on Deploy Failure)
   destroy:
-    needs: [deploy]
     runs-on: ubuntu-latest
     if: >
       ${{
