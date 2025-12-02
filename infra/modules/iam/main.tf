@@ -1,4 +1,3 @@
-
 ###################################
 # Load Balancer Controller Resources
 ###################################
@@ -247,12 +246,30 @@ resource "aws_iam_policy" "lb_controller_policy" {
           "elasticloadbalancing:SetRulePriorities"
         ]
         Resource = "*"
+      },
+      # Additional permissions for cleanup and deletion without tag restrictions
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTags"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:DeleteSecurityGroup",
+          "ec2:DescribeSecurityGroups"
+        ]
+        Resource = "*"
       }
     ]
   })
 }
-
-
 
 # IAM Role for ALB Controller (IRSA)
 resource "aws_iam_role" "lb_controller_role" {
@@ -292,7 +309,8 @@ resource "aws_iam_role_policy_attachment" "lb_controller_attach" {
 resource "aws_iam_policy" "external_dns_policy" {
   name        = "ExternalDNSIAMPolicy"
   description = "IAM policy for External DNS to manage Route53 records"
-  policy      = jsonencode({
+  
+  policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
@@ -301,7 +319,10 @@ resource "aws_iam_policy" "external_dns_policy" {
           "route53:ChangeResourceRecordSets",
           "route53:ListResourceRecordSets",
           "route53:ListHostedZones",
-          "route53:ListTagsForResource"
+          "route53:ListHostedZonesByName",
+          "route53:ListTagsForResource",
+          "route53:GetChange",
+          "route53:GetHostedZone"
         ],
         Resource = "*"
       }
@@ -336,64 +357,4 @@ resource "aws_iam_role" "external_dns_role" {
 resource "aws_iam_role_policy_attachment" "external_dns_attach_custom" {
   role       = aws_iam_role.external_dns_role.name
   policy_arn = aws_iam_policy.external_dns_policy.arn
-}
-
-###################################
-# Flask App Secrets - IRSA
-###################################
-
-resource "aws_iam_policy" "flask_app_secrets_policy" {
-  name = "flask-app-secrets-policy"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = ["kms:Decrypt"]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-data "aws_iam_policy_document" "flask_app_assume_role" {
-  statement {
-    effect = "Allow"
-    principals {
-      type        = "Federated"
-      identifiers = [var.oidc_provider_arn]
-    }
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-    
-    condition {
-      test     = "StringEquals"
-      variable = "${replace(var.oidc_provider_url, "https://", "")}:sub"
-      values   = ["system:serviceaccount:default:flask-app-sa"]
-    }
-    
-    condition {
-      test     = "StringEquals"
-      variable = "${replace(var.oidc_provider_url, "https://", "")}:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "flask_app_role" {
-  name               = "flask-app-secrets-role"
-  assume_role_policy = data.aws_iam_policy_document.flask_app_assume_role.json
-}
-
-resource "aws_iam_role_policy_attachment" "flask_app_attach" {
-  role       = aws_iam_role.flask_app_role.name
-  policy_arn = aws_iam_policy.flask_app_secrets_policy.arn
 }

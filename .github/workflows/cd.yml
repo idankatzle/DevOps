@@ -26,6 +26,7 @@ env:
   VPC_NAME: eksdemo-vpc
   ARGOCD_CLB: eksdemo-argocd-clb
   FLASK_ALB: eksdemo-flask-alb
+  DOMAIN: saharbittman.net
 
 jobs:
   deploy:
@@ -196,21 +197,182 @@ jobs:
         run: |
           echo "🗑️ Starting cleanup..."
           aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.CLUSTER_NAME }}" || true
-          echo "🔧 Removing Kubernetes finalizers..."
-          kubectl get applicationset.argoproj.io -n argocd -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl get ingress -A -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          echo "🗑️ Deleting ingresses..."
-          kubectl delete ingress --all -A --timeout=60s || true
-          echo "🗑️ Deleting ArgoCD ApplicationSets..."
-          kubectl delete applicationset.argoproj.io --all -n argocd --timeout=60s || true
-          echo "🗑️ Deleting ArgoCD Applications..."
-          kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
-          echo "🗑️ Uninstalling ArgoCD..."
+          
+          # ========================================
+          # CRITICAL: Delete through K8s, NOT AWS CLI!
+          # Let the controllers handle AWS cleanup
+          # ========================================
+          
+          # ========================================
+          # STEP 1: Delete Ingress resources (ALB Controller will cleanup ALB/TG/SG)
+          # ========================================
+          echo "🗑️ Step 1: Deleting ingresses through kubectl..."
+          echo "⚠️ Keeping finalizers - letting ALB Controller cleanup AWS resources"
+          
+          kubectl delete ingress --all -A --wait=true --timeout=5m || {
+            echo "⚠️ Ingress deletion timed out or failed, checking status..."
+            kubectl get ingress -A
+          }
+          
+          # Wait a bit for controller to process
+          echo "⏳ Waiting 30s for ALB Controller to process deletion..."
+          sleep 30
+          
+          # Check if any ingress stuck in Terminating
+          STUCK_INGRESS=$(kubectl get ingress -A --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
+          if [ "$STUCK_INGRESS" -gt "0" ]; then
+            echo "⚠️ Found $STUCK_INGRESS ingress(es) stuck in Terminating state"
+            kubectl get ingress -A --field-selector metadata.deletionTimestamp!=''
+            
+            echo "🔧 Removing finalizers from stuck ingresses..."
+            kubectl get ingress -A -o name 2>/dev/null | \
+              xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          else
+            echo "✅ All ingresses deleted cleanly"
+          fi
+          
+          # ========================================
+          # STEP 2: Delete ArgoCD Applications (External DNS will cleanup Route53)
+          # ========================================
+          echo "🗑️ Step 2: Deleting ArgoCD Applications..."
+          echo "⚠️ Keeping finalizers - letting External DNS cleanup Route53"
+          
+          kubectl delete applications.argoproj.io --all -n argocd --wait=true --timeout=3m || {
+            echo "⚠️ Applications deletion timed out or failed"
+          }
+          
+          # Wait for External DNS to cleanup
+          echo "⏳ Waiting 30s for External DNS to process deletion..."
+          sleep 30
+          
+          # Check for stuck applications
+          STUCK_APPS=$(kubectl get applications.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
+          if [ "$STUCK_APPS" -gt "0" ]; then
+            echo "⚠️ Found $STUCK_APPS application(s) stuck in Terminating state"
+            kubectl get applications.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!=''
+            
+            echo "🔧 Removing finalizers from stuck applications..."
+            kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
+              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          else
+            echo "✅ All applications deleted cleanly"
+          fi
+          
+          # ========================================
+          # STEP 3: Delete ApplicationSets (this removes ALB Controller & External DNS)
+          # ========================================
+          echo "🗑️ Step 3: Deleting ArgoCD ApplicationSets..."
+          
+          kubectl delete applicationset.argoproj.io --all -n argocd --wait=true --timeout=3m || {
+            echo "⚠️ ApplicationSets deletion timed out or failed"
+          }
+          
+          # Check for stuck applicationsets
+          STUCK_APPSETS=$(kubectl get applicationset.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!='' --no-headers 2>/dev/null | wc -l)
+          if [ "$STUCK_APPSETS" -gt "0" ]; then
+            echo "⚠️ Found $STUCK_APPSETS applicationset(s) stuck in Terminating state"
+            kubectl get applicationset.argoproj.io -n argocd --field-selector metadata.deletionTimestamp!=''
+            
+            echo "🔧 Removing finalizers from stuck applicationsets..."
+            kubectl get applicationset.argoproj.io -n argocd -o name 2>/dev/null | \
+              xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          else
+            echo "✅ All applicationsets deleted cleanly"
+          fi
+          
+          # ========================================
+          # STEP 4: Uninstall ArgoCD
+          # ========================================
+          echo "🗑️ Step 4: Uninstalling ArgoCD..."
           helm uninstall argocd -n argocd --timeout=2m || true
+          
+          # ========================================
+          # STEP 5: Verify cleanup (using AWS CLI only for verification)
+          # ========================================
+          echo "🔍 Step 5: Verifying cleanup (this is just a check, not deletion)..."
+          
+          echo ""
+          echo "📋 Checking for orphaned ALBs..."
+          ALB_COUNT=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName, '${{ env.FLASK_ALB }}')] | length(@)" \
+            --output text 2>/dev/null || echo "0")
+          
+          if [ "$ALB_COUNT" -gt "0" ]; then
+            echo "❌ Found $ALB_COUNT orphaned ALB(s):"
+            aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?contains(LoadBalancerName, '${{ env.FLASK_ALB }}')].[LoadBalancerName,LoadBalancerArn]" \
+              --output table
+          else
+            echo "✅ No orphaned ALBs"
+          fi
+          
+          echo ""
+          echo "📋 Checking for orphaned Target Groups..."
+          TG_COUNT=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?contains(TargetGroupName, 'k8s-')] | length(@)" \
+            --output text 2>/dev/null || echo "0")
+          
+          if [ "$TG_COUNT" -gt "0" ]; then
+            echo "❌ Found $TG_COUNT orphaned Target Group(s):"
+            aws elbv2 describe-target-groups \
+              --query "TargetGroups[?contains(TargetGroupName, 'k8s-')].[TargetGroupName,TargetGroupArn]" \
+              --output table
+          else
+            echo "✅ No orphaned Target Groups"
+          fi
+          
+          echo ""
+          echo "📋 Checking for orphaned Security Groups..."
+          SG_COUNT=$(aws ec2 describe-security-groups \
+            --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${{ env.CLUSTER_NAME }}" \
+            --query "SecurityGroups | length(@)" \
+            --output text 2>/dev/null || echo "0")
+          
+          if [ "$SG_COUNT" -gt "0" ]; then
+            echo "❌ Found $SG_COUNT orphaned Security Group(s):"
+            aws ec2 describe-security-groups \
+              --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${{ env.CLUSTER_NAME }}" \
+              --query "SecurityGroups[*].[GroupName,GroupId]" \
+              --output table
+          else
+            echo "✅ No orphaned Security Groups"
+          fi
+          
+          echo ""
+          echo "📋 Checking for orphaned Route53 records..."
+          HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+            --dns-name "${{ env.DOMAIN }}" \
+            --query "HostedZones[0].Id" \
+            --output text 2>/dev/null | cut -d'/' -f3)
+          
+          if [ -n "$HOSTED_ZONE_ID" ] && [ "$HOSTED_ZONE_ID" != "None" ]; then
+            DNS_COUNT=$(aws route53 list-resource-record-sets \
+              --hosted-zone-id "$HOSTED_ZONE_ID" \
+              --query "ResourceRecordSets[?Name=='www.${{ env.DOMAIN }}.'] | length(@)" \
+              --output text 2>/dev/null || echo "0")
+            
+            if [ "$DNS_COUNT" -gt "0" ]; then
+              echo "❌ Found $DNS_COUNT orphaned DNS record(s):"
+              aws route53 list-resource-record-sets \
+                --hosted-zone-id "$HOSTED_ZONE_ID" \
+                --query "ResourceRecordSets[?Name=='www.${{ env.DOMAIN }}.'].[Name,Type]" \
+                --output table
+            else
+              echo "✅ No orphaned Route53 records"
+            fi
+          else
+            echo "⚠️ Hosted zone not found or error occurred"
+          fi
+          
+          echo ""
+          TOTAL_ORPHANS=$((ALB_COUNT + TG_COUNT + SG_COUNT + DNS_COUNT))
+          if [ "$TOTAL_ORPHANS" -gt "0" ]; then
+            echo "❌ Cleanup verification FAILED - found $TOTAL_ORPHANS orphaned resource(s)"
+            echo "⚠️ You may need to run manual cleanup"
+            exit 1
+          else
+            echo "✅ Cleanup verification PASSED - no orphaned resources found!"
+          fi
 
 
   destroy-bootstrap:
