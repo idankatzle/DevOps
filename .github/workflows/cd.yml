@@ -267,16 +267,6 @@ jobs:
 
           echo "🎉 ArgoCD AWS resources cleanup completed!"
   
-
-          helm uninstall argocd -n argocd --timeout=2m || true
-          echo "⏳ Waiting 10s..."
-          sleep 10
-
-          # Verify
-          if kubectl get ns argocd >/dev/null 2>&1; then
-            echo "⚠️ Namespace still exists — deleting..."
-            kubectl delete ns argocd --force --grace-period=0 || true
-          fi
           VPC_NAME="eksdemo-vpc"
 
           echo "🔍 Getting VPC ID for: $VPC_NAME ..."
