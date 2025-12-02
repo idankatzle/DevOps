@@ -134,9 +134,8 @@ jobs:
           exit 1
 
   destroy:
-    needs: [deploy]
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'destroy' || failure() }}
+    if: ${{ github.event.inputs.action == 'destroy' || (failure() && github.event.inputs.action == 'apply') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
