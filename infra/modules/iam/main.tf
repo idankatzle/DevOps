@@ -358,3 +358,63 @@ resource "aws_iam_role_policy_attachment" "external_dns_attach_custom" {
   role       = aws_iam_role.external_dns_role.name
   policy_arn = aws_iam_policy.external_dns_policy.arn
 }
+
+###################################
+# Flask App Secrets - IRSA
+###################################
+
+resource "aws_iam_policy" "flask_app_secrets_policy" {
+  name = "flask-app-secrets-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["kms:Decrypt"]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+data "aws_iam_policy_document" "flask_app_assume_role" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Federated"
+      identifiers = [var.oidc_provider_arn]
+    }
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(var.oidc_provider_url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:default:flask-app-sa"]
+    }
+    
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(var.oidc_provider_url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "flask_app_role" {
+  name               = "flask-app-secrets-role"
+  assume_role_policy = data.aws_iam_policy_document.flask_app_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "flask_app_attach" {
+  role       = aws_iam_role.flask_app_role.name
+  policy_arn = aws_iam_policy.flask_app_secrets_policy.arn
+}
