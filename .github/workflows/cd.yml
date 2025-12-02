@@ -29,6 +29,7 @@ env:
   DOMAIN: saharbittman.com
 
 jobs:
+  # Job 1: Deploy/Apply
   deploy:
     runs-on: ubuntu-latest
     if: >
@@ -133,9 +134,18 @@ jobs:
           echo "❌ Smoke test failed - health endpoint did not return 'ok' after 200 attempts"
           exit 1
 
+  # Job 2: Destroy (Manual OR on Deploy Failure)
   destroy:
+    needs: [deploy]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    if: >
+      ${{
+        always() &&
+        (
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy') ||
+          needs.deploy.result == 'failure'
+        )
+      }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -396,10 +406,12 @@ jobs:
           fi
 
           echo "🎉 Full cleanup completed!"
+
+  # Job 3: Destroy Bootstrap (Only on Manual Destroy)
   destroy-bootstrap:
-    needs: destroy
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    needs: [destroy]
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
