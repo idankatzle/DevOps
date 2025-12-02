@@ -204,22 +204,6 @@ jobs:
       #     docker push "$DST_ECR:$TAG"
 
       #     echo "✅ Replication done!"
-          
-      # ========================================
-      # STEP 4: Uninstall ArgoCD
-      # ========================================
-      - name: Uninstall ArgoCD
-        run: |
-          
-          helm uninstall argocd -n argocd --timeout=2m || true
-          echo "⏳ Waiting 10s..."
-          sleep 10
-
-          # Verify
-          if kubectl get ns argocd >/dev/null 2>&1; then
-            echo "⚠️ Namespace still exists — deleting..."
-            kubectl delete ns argocd --force --grace-period=0 || true
-          fi
 
       # ========================================
       # DESTROY EVERYTHING
@@ -227,7 +211,63 @@ jobs:
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
-          echo "🗑️ Uninstalling ArgoCD..."
+          echo "🗑️ Cleaning ArgoCD Classic Load Balancer: $ARGOCD_CLB"
+
+          # ============================
+          # FIND CLB BY NAME
+          # ============================
+          CLB_ARN=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?LoadBalancerName=='$ARGOCD_CLB'].LoadBalancerArn" \
+            --output text)
+
+          if [ -z "$CLB_ARN" ] || [ "$CLB_ARN" = "None" ]; then
+            echo "✔ No CLB found with name $ARGOCD_CLB"
+          else
+            echo "🔍 Found CLB ARN: $CLB_ARN"
+
+            # ============================
+            # DELETE LISTENERS
+            # ============================
+            echo "🧹 Deleting Listeners..."
+            LISTENERS=$(aws elbv2 describe-listeners \
+              --load-balancer-arn "$CLB_ARN" \
+              --query "Listeners[].ListenerArn" \
+              --output text)
+
+            for L in $LISTENERS; do
+              echo "  ➤ Deleting Listener: $L"
+              aws elbv2 delete-listener --listener-arn "$L" || true
+            done
+
+            sleep 5
+
+            # ============================
+            # DELETE LOAD BALANCER
+            # ============================
+            echo "🗑️ Deleting Classic Load Balancer: $CLB_ARN"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$CLB_ARN" || true
+
+            echo "⏳ Waiting 40s for CLB deletion..."
+            sleep 40
+          fi
+
+          # ============================
+          # DELETE TARGET GROUPS NAMED BY ARGOCD
+          # ============================
+          echo "🧹 Deleting ArgoCD Target Groups..."
+
+          TG_ARNS=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?contains(TargetGroupName, 'argocd')].TargetGroupArn" \
+            --output text)
+
+          for TG in $TG_ARNS; do
+            echo "  ➤ Deleting Target Group: $TG"
+            aws elbv2 delete-target-group --target-group-arn "$TG" || true
+          done
+
+          echo "🎉 ArgoCD AWS resources cleanup completed!"
+  
+
           helm uninstall argocd -n argocd --timeout=2m || true
           echo "⏳ Waiting 10s..."
           sleep 10
