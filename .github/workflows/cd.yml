@@ -32,11 +32,12 @@ jobs:
   # ============================================
   apply:
     runs-on: ubuntu-latest
-    if: >
-      ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply') ||
-         (github.event_name == 'workflow_run' && 
-          github.event.workflow_run.name == 'CI Build & Test' && 
-          github.event.workflow_run.conclusion == 'success') }}
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -125,8 +126,11 @@ jobs:
   # Job 2: DESTROY (Cleanup)
   # ============================================
   destroy:
+    needs: apply
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    if: >
+      (needs.apply.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -286,8 +290,8 @@ jobs:
   # ============================================
   destroy-bootstrap:
     needs: destroy
-    if: github.event.inputs.action == 'destroy' && needs.destroy.result == 'success'
     runs-on: ubuntu-latest
+    if: needs.destroy.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
