@@ -1,4 +1,4 @@
-name: CD to EKS
+name: EKS Infrastructure Management
 
 on:
   workflow_run:
@@ -8,9 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Apply or Destroy"
+        description: "Choose action"
         required: true
-        default: "apply"
         type: choice
         options:
           - apply
@@ -28,10 +27,13 @@ env:
   FLASK_ALB: eksdemo-flask-alb
 
 jobs:
-  deploy:
+  # ============================================
+  # Job 1: APPLY (Deploy)
+  # ============================================
+  apply:
     runs-on: ubuntu-latest
     if: >
-      ${{ github.event_name == 'workflow_dispatch' || 
+      ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply') ||
          (github.event_name == 'workflow_run' && 
           github.event.workflow_run.name == 'CI Build & Test' && 
           github.event.workflow_run.conclusion == 'success') }}
@@ -44,7 +46,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions
+          role-session-name: github-actions-apply
 
       - name: Update kubeconfig for EKS
         run: |
@@ -119,11 +121,12 @@ jobs:
           echo "❌ Smoke test failed after 100 attempts"
           exit 1
 
-
+  # ============================================
+  # Job 2: DESTROY (Cleanup)
+  # ============================================
   destroy:
-    needs: deploy
     runs-on: ubuntu-latest
-    if: github.event.inputs.action == 'destroy' || needs.deploy.result == 'success'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -133,7 +136,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions
+          role-session-name: github-actions-destroy
 
       - name: Update kubeconfig
         run: |
@@ -211,6 +214,7 @@ jobs:
           fi
 
           # Cleanup Load Balancer, Target Groups
+          echo "🗑️ Cleaning up Load Balancers..."
           CLB_ARN=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?LoadBalancerName=='${{ env.ARGOCD_CLB }}'].LoadBalancerArn" --output text)
           if [ -n "$CLB_ARN" ] && [ "$CLB_ARN" != "None" ]; then
             LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$CLB_ARN" --query "Listeners[].ListenerArn" --output text)
@@ -222,16 +226,22 @@ jobs:
             sleep 40
           fi
 
+          echo "🗑️ Cleaning up Target Groups..."
           TG_ARNS=$(aws elbv2 describe-target-groups --query "TargetGroups[?contains(TargetGroupName, 'argocd')].TargetGroupArn" --output text)
           for TG in $TG_ARNS; do
             aws elbv2 delete-target-group --target-group-arn "$TG" || true
           done
 
+          echo "🗑️ Deleting ArgoCD namespace..."
           kubectl delete namespace argocd --timeout=5m || true
           sleep 20
 
+          echo "🗑️ Cleaning up VPC resources..."
           VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" --query "Vpcs[0].VpcId" --output text)
           if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+            echo "Found VPC: $VPC_ID"
+            
+            # Delete all ALBs/NLBs in VPC
             LB_ARNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text)
             for LB in $LB_ARNS; do
               LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$LB" --query "Listeners[].ListenerArn" --output text)
@@ -241,12 +251,15 @@ jobs:
               aws elbv2 delete-load-balancer --load-balancer-arn "$LB" || true
             done
             sleep 90
+            
+            # Delete Target Groups
             TG_ARNS=$(aws elbv2 describe-target-groups --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" --output text)
             for TG in $TG_ARNS; do
               aws elbv2 delete-target-group --target-group-arn "$TG" || true
             done
             sleep 30
 
+            # Delete ENIs attached to Security Groups
             SG_IDS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text)
             for SG in $SG_IDS; do
               ENIS=$(aws ec2 describe-network-interfaces --filters "Name=group-id,Values=$SG" --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
@@ -264,8 +277,13 @@ jobs:
               [ "$EGRESS" != "[]" ] && aws ec2 revoke-security-group-egress --group-id "$SG" --ip-permissions "$EGRESS" || true
               aws ec2 delete-security-group --group-id "$SG" || true
             done
+            
+            echo "✅ VPC resources cleanup completed"
           fi
 
+  # ============================================
+  # Job 3: DESTROY TERRAFORM (Bootstrap)
+  # ============================================
   destroy-bootstrap:
     needs: destroy
     if: github.event.inputs.action == 'destroy' && needs.destroy.result == 'success'
@@ -284,14 +302,20 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions
+          role-session-name: github-actions-terraform-destroy
 
       - name: Terraform Init
         run: |
           cd infra
           terraform init -upgrade
 
-      - name: Destroy Bootstrap Infra
+      - name: Destroy Bootstrap Infrastructure
         run: |
           cd infra
           terraform destroy -auto-approve
+          
+      - name: Cleanup Complete
+        run: |
+          echo "🎉 ================================"
+          echo "✅ Infrastructure destroyed successfully!"
+          echo "================================"
