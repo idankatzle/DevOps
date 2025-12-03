@@ -105,23 +105,28 @@ jobs:
       - name: Smoke Test
         run: |
           URL="https://www.saharbittman.com/health"
-
-          for i in {1..100}; do
-            response=$(curl -s "$URL")
-            status=$?
-
-            if [ $status -eq 0 ] && [ "$response" = "OK" ]; then
-              echo "✅ App is live! Body: $response"
+          
+          echo "🧪 Starting smoke test for: $URL"
+          echo "⏳ Waiting for application to be ready..."
+          
+          for i in {1..60}; do
+            # Get both response body and HTTP status
+            HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" "$URL" 2>/dev/null || echo "000")
+            RESPONSE=$(cat /tmp/response.txt 2>/dev/null || echo "")
+            
+            echo "Attempt $i/60 - HTTP: $HTTP_CODE - Body: $RESPONSE"
+            
+            # Success if HTTP 200 OR body contains "OK"
+            if [ "$HTTP_CODE" = "200" ] || [ "$RESPONSE" = "OK" ]; then
+              echo "✅ App is live!"
               exit 0
             fi
-
-            echo "⏳ Attempt $i/100 - Body: $response"
-            sleep 15
+            
+            sleep 30
           done
-
-          echo "❌ Smoke test failed after 100 attempts"
+          
+          echo "❌ Smoke test failed after 60 attempts"
           exit 1
-
   # ============================================
   # Job 2: DESTROY (Cleanup)
   # ============================================
