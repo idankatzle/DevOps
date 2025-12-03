@@ -102,23 +102,23 @@ jobs:
       - name: Smoke Test
         run: |
           URL="https://www.saharbittman.com/health"
-          
+
           for i in {1..100}; do
-            response=$(curl -s -w "%{http_code}" -o /tmp/health_response.txt $URL || echo "000")
-            http_body=$(cat /tmp/health_response.txt)
-            http_status="${response: -3}"
-            
-            if [ "$http_status" = "200" ] && [ "$http_body" = "OK" ]; then
-              echo "✅ App is live! Status: $http_status, Body: $http_body"
+            response=$(curl -s "$URL")
+            status=$?
+
+            if [ $status -eq 0 ] && [ "$response" = "OK" ]; then
+              echo "✅ App is live! Body: $response"
               exit 0
             fi
-            
-            echo "⏳ Attempt $i/100 - Status: $http_status, Body: $http_body"
+
+            echo "⏳ Attempt $i/100 - Body: $response"
             sleep 15
           done
-          
+
           echo "❌ Smoke test failed after 100 attempts"
           exit 1
+
 
   destroy:
     needs: deploy
@@ -139,7 +139,7 @@ jobs:
         run: |
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
-      - name: Cleanup Kubernetes & ArgoCD
+      - name: Cleanup Kubernetes & ArgoCD & AWS Resources
         run: |
           echo "🗑️ Deleting ArgoCD ApplicationSets..."
           kubectl delete applicationsets --all -n argocd --timeout=5m || true
@@ -159,7 +159,58 @@ jobs:
           echo "⏳ Waiting 60s for LoadBalancer deletion..."
           sleep 60
 
-          # Cleanup Load Balancer, Target Groups, Security Groups, ENIs, VPC
+          # Cleanup DNS Records - ONLY subdomains, NOT NS/SOA/apex
+          echo "🗑️ Deleting Route53 DNS records for subdomains..."
+          HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+            --dns-name "saharbittman.com" \
+            --query "HostedZones[0].Id" --output text | cut -d'/' -f3)
+          
+          if [ -n "$HOSTED_ZONE_ID" ] && [ "$HOSTED_ZONE_ID" != "None" ]; then
+            echo "Found Hosted Zone: $HOSTED_ZONE_ID"
+            
+            # Get all records EXCEPT NS and SOA (and apex domain)
+            RECORDS=$(aws route53 list-resource-record-sets \
+              --hosted-zone-id "$HOSTED_ZONE_ID" \
+              --query "ResourceRecordSets[?Type!='NS' && Type!='SOA']" \
+              --output json)
+            
+            # Delete each subdomain record
+            echo "$RECORDS" | jq -c '.[]' | while read -r record; do
+              RECORD_NAME=$(echo "$record" | jq -r '.Name')
+              RECORD_TYPE=$(echo "$record" | jq -r '.Type')
+              
+              # Skip apex domain (saharbittman.com itself)
+              if [[ "$RECORD_NAME" == "saharbittman.com." ]]; then
+                echo "⏭️  Skipping apex record: $RECORD_NAME ($RECORD_TYPE)"
+                continue
+              fi
+              
+              echo "🗑️  Deleting DNS record: $RECORD_NAME ($RECORD_TYPE)"
+              
+              # Create change batch for deletion
+              CHANGE_BATCH=$(cat <<EOF
+          {
+            "Changes": [{
+              "Action": "DELETE",
+              "ResourceRecordSet": $record
+            }]
+          }
+          EOF
+              )
+              
+              aws route53 change-resource-record-sets \
+                --hosted-zone-id "$HOSTED_ZONE_ID" \
+                --change-batch "$CHANGE_BATCH" || true
+              
+              sleep 2
+            done
+            
+            echo "✅ DNS subdomains cleanup completed (NS/SOA preserved)"
+          else
+            echo "⚠️ Hosted zone for saharbittman.com not found"
+          fi
+
+          # Cleanup Load Balancer, Target Groups
           CLB_ARN=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?LoadBalancerName=='${{ env.ARGOCD_CLB }}'].LoadBalancerArn" --output text)
           if [ -n "$CLB_ARN" ] && [ "$CLB_ARN" != "None" ]; then
             LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$CLB_ARN" --query "Listeners[].ListenerArn" --output text)
