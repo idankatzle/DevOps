@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-nginx-service
+spec:
+  selector:
+    app: nginx
+  ports:
+    - protocol: TCP
+      port: 80        # הפורט שהשירות מאזין לו
+      targetPort: 80  # הפורט בתוך הפוד של Nginx
+      nodePort: 30080 # הפורט שדרכו תיכנס מהדפדפן (בין 30000-32767)
+  type: NodePort
