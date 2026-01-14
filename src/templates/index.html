@@ -1,5 +1,21 @@
 <!DOCTYPE html>
 <html>
-<head><title>National Parks Map</title></head>
-<body><h1>National Parks Map - Back to Basics</h1></body>
+<head>
+    <title>National Parks Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        #map { height: 600px; width: 100%; }
+        body { font-family: Arial; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>National Parks Map - V1 (Restored)</h1>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([31.5, 34.75], 7);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        L.marker([31.5, 34.75]).addTo(map).bindPopup('Welcome to the Park!').openPopup();
+    </script>
+</body>
 </html>
