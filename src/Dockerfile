@@ -1,28 +1,16 @@
-###############################
-# Stage 1: Build Dependencies
-###############################
-FROM quay.io/fedora/python-312:latest AS builder
+FROM python:3.12-slim
 
-WORKDIR /build
+WORKDIR /app
+
+# התקנת דרישות
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-###############################
-# Stage 2: Production
-###############################
-# משתמשים באותו אימג' בסיס של פדורה כדי למנוע משיכה מ-Docker Hub
-FROM quay.io/fedora/python-312:latest
+# העתקת כל הפרויקט (כולל תיקיות המפה templates ו-static)
+COPY . .
 
-# פדורה משתמשת ב-useradd ולא ב-adduser (כמו ב-Alpine)
-RUN useradd -m appuser
-USER appuser
-WORKDIR /home/appuser
-
-# העתקת החבילות מה-builder
-COPY --from=builder /root/.local /home/appuser/.local
-# העתקת הקוד (וודא שהקובץ נמצא ב-src)
-COPY app.py .
-
-ENV PATH="/home/appuser/.local/bin:${PATH}"
+# הגדרת משתמש לא-שורש למניעת שגיאות אבטחה
+RUN useradd -m myuser && chown -R myuser /app
+USER myuser
 
 CMD ["python", "app.py"]
