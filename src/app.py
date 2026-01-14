@@ -523,4 +523,4 @@ if __name__ == "__main__":
         print(f"✅ Database connection configured: {DB_USER}@{DB_HOST}/{DB_NAME}")
     else:
         print("⚠️  Running without database")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=True)
