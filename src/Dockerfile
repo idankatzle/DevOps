@@ -1,18 +1,16 @@
 FROM registry.access.redhat.com/ubi9/python-312:latest
 
-# חזרה למשתמש שורש רק בשביל ההתקנה וההעתקה
-USER root
+# מתעלמים מהקבצים שגורמים לשגיאת ההרשאות ב-OpenShift
+LABEL io.kaniko.ignore-path="/usr/bin/newgidmap /usr/bin/newuidmap /usr/sbin/suexec"
 
+USER root
 WORKDIR /app
 
-# העתקת דרישות והתקנה
+# העתקת הכל (חובה בשביל המפה!)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# העתקת הכל (זה מה שיחזיר את המפה!)
 COPY . .
 
-# הגדרת הרשאות למשתמש ברירת המחדל של OpenShift (1001)
 RUN chown -R 1001:0 /app
 USER 1001
 
