@@ -1,16 +1,17 @@
-FROM python:3.12-slim
+FROM quay.io/fedora/python-312:latest
 
+USER root
 WORKDIR /app
 
 # התקנת דרישות
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# העתקת כל הפרויקט (כולל תיקיות המפה templates ו-static)
+# העתקת כל הפרויקט (כולל תיקיות המפה)
 COPY . .
 
-# הגדרת משתמש לא-שורש למניעת שגיאות אבטחה
-RUN useradd -m myuser && chown -R myuser /app
-USER myuser
+# הגדרת הרשאות
+RUN chown -R 1001:0 /app
+USER 1001
 
 CMD ["python", "app.py"]
