@@ -1,17 +1,16 @@
-FROM quay.io/fedora/python-312:latest
+FROM quay.io/biocontainers/python:3.12--1
 
-USER root
 WORKDIR /app
 
-# התקנת דרישות
+# התקנת ספריות הכרחיות
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# העתקת כל הפרויקט (כולל תיקיות המפה)
+# העתקת הכל (כולל תיקיות המפה)
 COPY . .
 
-# הגדרת הרשאות
-RUN chown -R 1001:0 /app
-USER 1001
+# הרשאות משתמש
+RUN useradd -m myuser && chown -R myuser /app
+USER myuser
 
 CMD ["python", "app.py"]
