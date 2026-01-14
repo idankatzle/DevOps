@@ -1,16 +1,19 @@
-FROM quay.io/biocontainers/python:3.12--1
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+# חזרה למשתמש שורש רק בשביל ההתקנה וההעתקה
+USER root
 
 WORKDIR /app
 
-# התקנת ספריות הכרחיות
+# העתקת דרישות והתקנה
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# העתקת הכל (כולל תיקיות המפה)
+# העתקת הכל (זה מה שיחזיר את המפה!)
 COPY . .
 
-# הרשאות משתמש
-RUN useradd -m myuser && chown -R myuser /app
-USER myuser
+# הגדרת הרשאות למשתמש ברירת המחדל של OpenShift (1001)
+RUN chown -R 1001:0 /app
+USER 1001
 
 CMD ["python", "app.py"]
