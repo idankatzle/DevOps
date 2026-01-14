@@ -4,35 +4,25 @@
 FROM quay.io/fedora/python-312:latest AS builder
 
 WORKDIR /build
-
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 ###############################
-# Stage 2: Production (Alpine)
+# Stage 2: Production
 ###############################
-FROM python:3.12-alpine
+# משתמשים באותו אימג' בסיס של פדורה כדי למנוע משיכה מ-Docker Hub
+FROM quay.io/fedora/python-312:latest
 
-# Create non-root user
-RUN adduser -D -h /home/appuser -s /bin/sh appuser
+# פדורה משתמשת ב-useradd ולא ב-adduser (כמו ב-Alpine)
+RUN useradd -m appuser
+USER appuser
+WORKDIR /home/appuser
 
-WORKDIR /app
-
-# Copy installed packages from builder
+# העתקת החבילות מה-builder
 COPY --from=builder /root/.local /home/appuser/.local
-
-# Copy application code
+# העתקת הקוד (וודא שהקובץ נמצא ב-src)
 COPY app.py .
 
-# Set ownership
-RUN chown -R appuser:appuser /app
+ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-# Switch to non-root user
-USER appuser
-
-# Expose port
-EXPOSE 5000
-
-# Run the app
 CMD ["python", "app.py"]
