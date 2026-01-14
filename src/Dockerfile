@@ -1,17 +1,15 @@
-FROM registry.access.redhat.com/ubi9/python-312:latest
+FROM quay.io/prometheus/busybox:latest
 
-# מתעלמים מהקבצים שגורמים לשגיאת ההרשאות ב-OpenShift
-LABEL io.kaniko.ignore-path="/usr/bin/newgidmap /usr/bin/newuidmap /usr/sbin/suexec"
+# אנחנו משתמשים בגישה של "העתקה בלבד" כדי לעקוף את Kaniko
+FROM python:3.9-slim
 
-USER root
 WORKDIR /app
 
-# העתקת הכל (חובה בשביל המפה!)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# העתקה של הכל - זה יחזיר את המפה
 COPY . .
 
-RUN chown -R 1001:0 /app
-USER 1001
+# התקנה בסיסית
+RUN pip install --no-cache-dir -r requirements.txt
 
+# פקודת הרצה
 CMD ["python", "app.py"]
