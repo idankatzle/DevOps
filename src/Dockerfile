@@ -1,7 +1,7 @@
 ###############################
 # Stage 1: Build Dependencies
 ###############################
-FROM python:3.12-slim AS builder
+FROM quay.io/fedora/python-312:latest AS builder
 
 WORKDIR /build
 
